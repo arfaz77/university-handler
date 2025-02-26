@@ -1,17 +1,18 @@
 import { Hono, Context } from "hono";
 import { handle } from "hono/vercel";
 import University from "@/models/University"; // Adjust the import path as needed
-import { fileUploadMiddleware } from "@/middleware/upload"; // Adjust the import path as needed
+import { fileUploadMiddleware } from "../../../../middleware/upload"; // Adjust the import path as needed
 import { HTTPException } from "hono/http-exception";
 import dbConnect from "@/lib/mongoose";
-import mongoose, { ObjectId } from "mongoose";
+import mongoose   from "mongoose";
+
+import fs from 'fs/promises';
+import { v4 as uuidv4 } from 'uuid';
 // Custom interfaces
 
-interface CustomHonoRequest extends Request {
-  file?: {
-    path?: string;
-  };
-}
+import path from "path";
+
+
 
 // Define error types for better error handling
 enum ErrorType {
@@ -54,6 +55,30 @@ const errorHandler = async (err: Error, c: Context) => {
 
 // Apply error handler to all routes
 app.onError(errorHandler);
+
+async function saveFile(file: File, fieldName: string): Promise<string> {
+  const ext = path.extname(file.name);
+  const filename = `${fieldName}-${uuidv4()}${ext}`;
+  const filepath = path.join(process.cwd(), 'public/uploads', filename);
+  
+  const buffer = await file.arrayBuffer();
+  await fs.writeFile(filepath, Buffer.from(buffer));
+  
+  return `/uploads/${filename}`;
+}
+
+// Function to remove file
+async function removeFile(filePath: string | null): Promise<void> {
+  if (!filePath) return;
+  
+  try {
+    const fullPath = path.join(process.cwd(), 'public', filePath);
+    await fs.access(fullPath); // Check if file exists
+    await fs.unlink(fullPath);
+  } catch (error) {
+    // File doesn't exist or can't be accessed, ignore
+  }
+}
 
 app.use("*", async (c, next) => {
   try {
@@ -178,17 +203,65 @@ app.get(`${basePath}/:id`, async (c) => {
 });
 
 // 📌 Edit University
-app.put(`${basePath}/:id`, async (c) => {
+app.put(`${basePath}/:id`, async (c: Context) => {
   try {
-    const id = c.req.param('id');
-    const updateData = await c.req.json();
-    const updatedUniversity = await University.findByIdAndUpdate(id, updateData, { new: true, runValidators: true });
-    if (!updatedUniversity) {
-      return c.json({ success: false, message: 'University not found' }, 404);
+    const { id } = c.req.param();
+    
+    // Get form data including files
+    const formData = await c.req.formData();
+    const body: Record<string, string> = {};
+    
+    // File paths
+    let university_pdf_path: string | undefined;
+    let university_image_path: string | undefined;
+    
+    // Process form data
+    for (const [key, value] of formData.entries()) {
+      if (value instanceof File) {
+        if (key === 'university_pdf') {
+          university_pdf_path = await saveFile(value, 'university_pdf');
+        } else if (key === 'university_image') {
+          university_image_path = await saveFile(value, 'university_image');
+        }
+      } else {
+        body[key] = value;
+      }
     }
-    return c.json({ success: true, data: updatedUniversity });
+    
+    // Find university
+    let university = await University.findById(id);
+    if (!university) return c.json({ error: 'University not found' }, 404);
+    
+    // Remove old files if new ones are uploaded
+    if (university_pdf_path) await removeFile(university.university_pdf);
+    if (university_image_path) await removeFile(university.university_image);
+    
+    // Update university fields with proper type conversion
+    if (body.university_name) university.university_name = body.university_name;
+    if (body.established_year) university.established_year = parseInt(body.established_year, 10);
+    if (body.approved_by) university.approved_by = body.approved_by;
+    if (body.type) university.type = body.type;
+    if (body.NAAC_grade) university.NAAC_grade = body.NAAC_grade;
+    if (body.ranked_by) university.ranked_by = body.ranked_by;
+    if (body.show_pdf) university.show_pdf = body.show_pdf === 'true';
+    
+    // Update file paths
+    if (university_pdf_path) university.university_pdf = university_pdf_path;
+    if (university_image_path) university.university_image = university_image_path;
+    
+    // Save the updated university
+    await university.save();
+    
+    return c.json({ 
+      message: 'University updated successfully', 
+      university 
+    });
+    
   } catch (error) {
-    return c.json({ success: false, message: error instanceof Error ? error.message : 'Unknown error' }, 500);
+    console.error("Update error:", error);
+    return c.json({ 
+      error: error instanceof Error ? error.message : 'Internal server error' 
+    }, 500);
   }
 });
 
@@ -251,6 +324,28 @@ app.put(`${basePath}/:id/categories/:categoryId`, fileUploadMiddleware, async (c
   }
 });
 
+// pu cat
+app.put('/:universityId/category/:categoryId', async (c) => {
+  const { universityId, categoryId } = c.req.param();
+  const body = await c.req.json();
+
+  try {
+    let university = await University.findById(universityId);
+    if (!university) return c.json({ error: 'University not found' }, 404);
+
+    let category = university.categories.id(categoryId);
+    if (!category) return c.json({ error: 'Category not found' }, 404);
+
+    category.category_name = body.category_name || category.category_name;
+    category.category_pdf = body.category_pdf || category.category_pdf;
+    category.show_pdf = body.show_pdf ?? category.show_pdf;
+
+    await university.save();
+    return c.json({ message: 'Category updated', university });
+  } catch (error) {
+    return c.json({ error: error.message }, 500);
+  }
+});
 
 // The rest of your routes follow the same pattern...
 // 📌 Delete Category
@@ -331,48 +426,28 @@ app.post(`${basePath}/:id/categories/:categoryId/courses`, fileUploadMiddleware,
 });
 
 // 📌 Update Course
-app.put(`${basePath}/:id/categories/:categoryId/courses/:courseId`, fileUploadMiddleware, async (c) => {
+app.put('/:universityId/category/:categoryId/course/:courseId', async (c) => {
+  const { universityId, categoryId, courseId } = c.req.param();
+  const body = await c.req.json();
+
   try {
-    const { id, categoryId, courseId } = c.req.param();
-    const body = await c.req.parseBody();
-    const course_name = body.course_name as string | undefined;
-    const filePath = ((c.req as unknown) as CustomHonoRequest).file?.path as string | undefined;
+    let university = await University.findById(universityId);
+    if (!university) return c.json({ error: 'University not found' }, 404);
 
-    const university = await University.findById(id);
-    if (!university) {
-      throw new HTTPException(404, { message: "University not found" });
-    }
+    let category = university.categories.id(categoryId);
+    if (!category) return c.json({ error: 'Category not found' }, 404);
 
-    const category = university.categories.find(cat => cat._id.toString() === categoryId);
-    if (!category) {
-      throw new HTTPException(404, { message: "Category not found" });
-    }
+    let course = category.courses.id(courseId);
+    if (!course) return c.json({ error: 'Course not found' }, 404);
 
-    const courseIndex = category.courses.findIndex(course => course._id.toString() === courseId);
-    if (courseIndex === -1) {
-      throw new HTTPException(404, { message: "Course not found" });
-    }
-
-    // Update course properties if provided
-    if (course_name) {
-      if (course_name.length < 2) {
-        throw new HTTPException(400, { message: "Course name must be at least 2 characters" });
-      }
-      category.courses[courseIndex].course_name = course_name;
-    }
-    
-    if (filePath) {
-      category.courses[courseIndex].course_pdf = filePath;
-    }
+    course.course_name = body.course_name || course.course_name;
+    course.course_pdf = body.course_pdf || course.course_pdf;
+    course.show_pdf = body.show_pdf ?? course.show_pdf;
 
     await university.save();
-    
-    return c.json({
-      success: true,
-      data: university
-    });
+    return c.json({ message: 'Course updated', university });
   } catch (error) {
-    throw error;
+    return c.json({ error: error.message }, 500);
   }
 });
 

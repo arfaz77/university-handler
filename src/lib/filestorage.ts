@@ -1,31 +1,22 @@
-import fs from 'fs/promises'
-import path from 'path'
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs-extra';
 
-const UPLOAD_DIR = path.join(process.cwd(), 'public', 'uploads')
+// Ensure the uploads directory exists
+const uploadDir = path.resolve('public/uploads');
+fs.ensureDirSync(uploadDir);
 
-// Ensure upload directory exists
-export async function initializeFileStorage() {
-  try {
-    await fs.access(UPLOAD_DIR)
-  } catch {
-    await fs.mkdir(UPLOAD_DIR, { recursive: true })
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+    const ext = path.extname(file.originalname);
+    cb(null, `${file.fieldname}-${uniqueSuffix}${ext}`);
   }
-}
+});
 
-export async function saveFile(file: Buffer, fileName: string): Promise<string> {
-  const uniqueFileName = `${Date.now()}-${fileName}`
-  const filePath = path.join(UPLOAD_DIR, uniqueFileName)
-  await fs.writeFile(filePath, file)
-  return `/uploads/${uniqueFileName}` // Returns public URL path
-}
+const upload = multer({ storage });
 
-export async function deleteFile(fileUrl: string) {
-  const fileName = fileUrl.split('/').pop()
-  if (!fileName) return
-  const filePath = path.join(UPLOAD_DIR, fileName)
-  try {
-    await fs.unlink(filePath)
-  } catch (error) {
-    console.error('Error deleting file:', error)
-  }
-}
+export default upload;
