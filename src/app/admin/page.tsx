@@ -18,18 +18,18 @@ console.log(universities);
       .catch(err => console.error('Error fetching universities:', err))
   }, [])
 
-  const handleDelete = async (_id: string) => {
-    try {
-      const res = await fetch(`/api/universities/${_id}`, {
-        method: 'DELETE'
-      })
-      if (res.ok) {
-        setUniversities(prev => prev.filter(uni => uni._id !== _id))
-      }
-    } catch (error) {
-      console.error('Error deleting university:', error)
-    }
-  }
+  // const handleDelete = async (_id: string) => {
+  //   try {
+  //     const res = await fetch(`/api/universities/${_id}`, {
+  //       method: 'DELETE'
+  //     })
+  //     if (res.ok) {
+  //       setUniversities(prev => prev.filter(uni => uni._id !== _id))
+  //     }
+  //   } catch (error) {
+  //     console.error('Error deleting university:', error)
+  //   }
+  // }
 
   if (isLoading) return <div>Loading...</div>
 

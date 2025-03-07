@@ -1,16 +1,14 @@
 import { Hono, Context } from "hono";
 import { handle } from "hono/vercel";
 import University from "@/models/University"; // Adjust the import path as needed
-import { fileUploadMiddleware } from "../../../../middleware/upload"; // Adjust the import path as needed
+// Adjust the import path as needed
 import { HTTPException } from "hono/http-exception";
 import dbConnect from "@/lib/mongoose";
 import mongoose   from "mongoose";
+import { uploadFileToGCS } from "@/middleware/upload";
 
-import fs from 'fs/promises';
-import { v4 as uuidv4 } from 'uuid';
-// Custom interfaces
 
-import path from "path";
+
 
 
 
@@ -56,29 +54,7 @@ const errorHandler = async (err: Error, c: Context) => {
 // Apply error handler to all routes
 app.onError(errorHandler);
 
-async function saveFile(file: File, fieldName: string): Promise<string> {
-  const ext = path.extname(file.name);
-  const filename = `${fieldName}-${uuidv4()}${ext}`;
-  const filepath = path.join(process.cwd(), 'public/uploads', filename);
-  
-  const buffer = await file.arrayBuffer();
-  await fs.writeFile(filepath, Buffer.from(buffer));
-  
-  return `/uploads/${filename}`;
-}
 
-// Function to remove file
-async function removeFile(filePath: string | null): Promise<void> {
-  if (!filePath) return;
-  
-  try {
-    const fullPath = path.join(process.cwd(), 'public', filePath);
-    await fs.access(fullPath); // Check if file exists
-    await fs.unlink(fullPath);
-  } catch (error) {
-    // File doesn't exist or can't be accessed, ignore
-  }
-}
 
 app.use("*", async (c, next) => {
   try {
@@ -110,61 +86,250 @@ app.use("*", async (c, next) => {
 // Define the base path for your API
 const basePath = "/api/universities";
 // 📌 Create University
+// app.post(basePath, async (c) => {
+//   try {
+//     const body = await c.req.json();
+//     const { university_name, university_image, established_year, approved_by, type, NAAC_grade, ranked_by, categories } = body;
+
+//     if (!university_name || university_name.length < 2) {
+//       return c.json({ success: false, message: 'University name must be at least 2 characters' }, 400);
+//     }
+
+//     // if (!university_image) {
+//     //   return c.json({ success: false, message: 'University image is required' }, 400);
+//     // }
+
+//     if (!established_year) {
+//       return c.json({ success: false, message: 'Established year is required' }, 400);
+//     }
+
+//     if (!approved_by) {
+//       return c.json({ success: false, message: 'Approved by is required' }, 400);
+//     }
+
+//     if (!type) {
+//       return c.json({ success: false, message: 'University type is required' }, 400);
+//     }
+
+//     const formattedCategories = categories?.map(category => ({
+//       category_name: category.category_name,
+//       category_pdf: null,
+//       show_pdf: false,
+//       courses: category.courses?.map(course => ({
+//         course_name: course.course_name,
+//         course_pdf: null,
+//         show_pdf: false
+//       })) || []
+//     })) || [];
+
+//     const newUniversity = new University({
+//       university_name,
+//       university_image,
+//       established_year,
+//       approved_by,
+//       type,
+//       NAAC_grade: NAAC_grade || null,
+//       ranked_by: ranked_by || null,
+//       university_pdf: null,
+//       show_pdf: false,
+//       categories: formattedCategories
+//     });
+
+//     await newUniversity.save();
+//     return c.json({ success: true, data: newUniversity }, 201);
+//   } catch (error) {
+//     return c.json({ success: false, message: error instanceof Error ? error.message : 'Unknown error' }, 500);
+//   }
+// });
+
+
+
 app.post(basePath, async (c) => {
   try {
-    const body = await c.req.json();
-    const { university_name, university_image, established_year, approved_by, type, NAAC_grade, ranked_by, categories } = body;
+    const formData = await c.req.formData();
+
+    // Extract fields
+    const university_name = formData.get("university_name") as string;
+    const established_year = Number(formData.get("established_year"));
+    const approved_by = formData.get("approved_by") as string;
+    const type = formData.get("type") as string;
+    const NAAC_grade = formData.get("NAAC_grade") as string | null;
+    const ranked_by = formData.get("ranked_by") as string | null;
 
     if (!university_name || university_name.length < 2) {
-      return c.json({ success: false, message: 'University name must be at least 2 characters' }, 400);
+      return c.json({ success: false, message: "University name must be at least 2 characters" }, 400);
     }
 
-    // if (!university_image) {
-    //   return c.json({ success: false, message: 'University image is required' }, 400);
-    // }
-
-    if (!established_year) {
-      return c.json({ success: false, message: 'Established year is required' }, 400);
+    // 🔹 Upload University Image
+    const university_image = formData.get("university_image") as File | null;
+    let universityImageUrl: string | null = null;
+    if (university_image) {
+      universityImageUrl = await uploadFileToGCS(university_image, "university_image");
     }
 
-    if (!approved_by) {
-      return c.json({ success: false, message: 'Approved by is required' }, 400);
+    // 🔹 Upload University PDF (if exists)
+    const university_pdf = formData.get("university_pdf") as File | null;
+    let universityPdfUrl: string | null = null;
+    if (university_pdf) {
+      universityPdfUrl = await uploadFileToGCS(university_pdf, "university_pdf");
     }
 
-    if (!type) {
-      return c.json({ success: false, message: 'University type is required' }, 400);
-    }
+    // 🔹 Process Categories & Courses
+    const categoriesJson = formData.get("categories") as string;
+    const categories = categoriesJson ? JSON.parse(categoriesJson) : [];
 
-    const formattedCategories = categories?.map(category => ({
-      category_name: category.category_name,
-      category_pdf: null,
-      show_pdf: false,
-      courses: category.courses?.map(course => ({
-        course_name: course.course_name,
-        course_pdf: null,
-        show_pdf: false
-      })) || []
-    })) || [];
+    const formattedCategories = await Promise.all(
+      categories.map(async (category: { category_name: string; category_pdf?: string; courses?: { course_name: string; course_pdf?: string }[] }) => {
+        let categoryPdfUrl: string | null = null;
+        if (category.category_pdf) {
+          const categoryPdfFile = formData.get(category.category_pdf) as File;
+          if (categoryPdfFile) {
+            categoryPdfUrl = await uploadFileToGCS(categoryPdfFile, "university_pdf");
+          }
+        }
 
+        const formattedCourses = await Promise.all(
+          category.courses?.map(async (course: { course_name: string; course_pdf?: string }) => {
+            let coursePdfUrl: string | null = null;
+            if (course.course_pdf) {
+              const coursePdfFile = formData.get(course.course_pdf) as File;
+              if (coursePdfFile) {
+                coursePdfUrl = await uploadFileToGCS(coursePdfFile, "university_pdf");
+              }
+            }
+            return {
+              course_name: course.course_name,
+              course_pdf: coursePdfUrl,
+              show_pdf: false,
+            };
+          }) || []
+        );
+
+        return {
+          category_name: category.category_name,
+          category_pdf: categoryPdfUrl,
+          show_pdf: false,
+          courses: formattedCourses,
+        };
+      })
+    );
+
+    // 🔹 Save to MongoDB
     const newUniversity = new University({
       university_name,
-      university_image,
+      university_image: universityImageUrl,
       established_year,
       approved_by,
       type,
-      NAAC_grade: NAAC_grade || null,
-      ranked_by: ranked_by || null,
-      university_pdf: null,
+      NAAC_grade,
+      ranked_by,
+      university_pdf: universityPdfUrl,
       show_pdf: false,
-      categories: formattedCategories
+      categories: formattedCategories,
     });
 
     await newUniversity.save();
+
     return c.json({ success: true, data: newUniversity }, 201);
   } catch (error) {
-    return c.json({ success: false, message: error instanceof Error ? error.message : 'Unknown error' }, 500);
+    console.error("Error creating university:", error);
+    return c.json({ success: false, message: error instanceof Error ? error.message : "Unknown error" }, 500);
   }
 });
+
+app.post(basePath, async (c) => {
+  try {
+    const formData = await c.req.formData();
+
+    // Extract fields
+    const university_name = formData.get("university_name") as string;
+    const established_year = Number(formData.get("established_year"));
+    const approved_by = formData.get("approved_by") as string;
+    const type = formData.get("type") as string;
+    const NAAC_grade = formData.get("NAAC_grade") as string | null;
+    const ranked_by = formData.get("ranked_by") as string | null;
+
+    if (!university_name || university_name.length < 2) {
+      return c.json({ success: false, message: "University name must be at least 2 characters" }, 400);
+    }
+
+    // 🔹 Upload University Image
+    const university_image = formData.get("university_image") as File | null;
+    let universityImageUrl: string | null = null;
+    if (university_image) {
+      universityImageUrl = await uploadFileToGCS(university_image, "university_image");
+    }
+
+    // 🔹 Upload University PDF (if exists)
+    const university_pdf = formData.get("university_pdf") as File | null;
+    let universityPdfUrl: string | null = null;
+    if (university_pdf) {
+      universityPdfUrl = await uploadFileToGCS(university_pdf, "university_pdf");
+    }
+
+    // 🔹 Process Categories & Courses
+    const categoriesJson = formData.get("categories") as string;
+    const categories = categoriesJson ? JSON.parse(categoriesJson) : [];
+
+    const formattedCategories = await Promise.all(
+      categories.map(async (category: any) => {
+        let categoryPdfUrl: string | null = null;
+        if (category.category_pdf) {
+          const categoryPdfFile = formData.get(category.category_pdf) as File;
+          if (categoryPdfFile) {
+            categoryPdfUrl = await uploadFileToGCS(categoryPdfFile, "university_pdf");
+          }
+        }
+
+        const formattedCourses = await Promise.all(
+          category.courses?.map(async (course: any) => {
+            let coursePdfUrl: string | null = null;
+            if (course.course_pdf) {
+              const coursePdfFile = formData.get(course.course_pdf) as File;
+              if (coursePdfFile) {
+                coursePdfUrl = await uploadFileToGCS(coursePdfFile, "university_pdf");
+              }
+            }
+            return {
+              course_name: course.course_name,
+              course_pdf: coursePdfUrl,
+              show_pdf: false,
+            };
+          }) || []
+        );
+
+        return {
+          category_name: category.category_name,
+          category_pdf: categoryPdfUrl,
+          show_pdf: false,
+          courses: formattedCourses,
+        };
+      })
+    );
+
+    // 🔹 Save to MongoDB
+    const newUniversity = new University({
+      university_name,
+      university_image: universityImageUrl,
+      established_year,
+      approved_by,
+      type,
+      NAAC_grade,
+      ranked_by,
+      university_pdf: universityPdfUrl,
+      show_pdf: false,
+      categories: formattedCategories,
+    });
+
+    await newUniversity.save();
+
+    return c.json({ success: true, data: newUniversity }, 201);
+  } catch (error) {
+    console.error("Error creating university:", error);
+    return c.json({ success: false, message: error instanceof Error ? error.message : "Unknown error" }, 500);
+  }
+});
+
 
 // 📌 Get All Universities (with pagination and search)
 app.get(basePath, async (c) => {
@@ -229,7 +394,7 @@ app.put(`${basePath}/:id`, async (c: Context) => {
     }
     
     // Find university
-    let university = await University.findById(id);
+    const university = await University.findById(id);
     if (!university) return c.json({ error: 'University not found' }, 404);
     
     // Remove old files if new ones are uploaded
@@ -281,7 +446,7 @@ app.delete(`${basePath}/:id`, async (c) => {
 });
 
 // 📌 Add Category to a University
-app.put(`${basePath}/:id/categories/:categoryId`, fileUploadMiddleware, async (c) => {
+app.put(`${basePath}/:id/categories/:categoryId`, async (c) => {
   try {
     const { id, categoryId } = c.req.param();
     const body = await c.req.parseBody();
@@ -377,7 +542,7 @@ app.delete(`${basePath}/:id/categories/:categoryId`, async (c) => {
 });
 
 // 📌 Add Course to a Category
-app.post(`${basePath}/:id/categories/:categoryId/courses`, fileUploadMiddleware, async (c) => {
+app.post(`${basePath}/:id/categories/:categoryId/courses`,  async (c) => {
   try {
     const { id, categoryId } = c.req.param();
     const body = await c.req.parseBody();
